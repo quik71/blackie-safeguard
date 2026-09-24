@@ -165,6 +165,75 @@ def restore_backup(backup_dir: str) -> dict:
             "archive": archive, "gateway": after}
 
 
+def start_main() -> dict:
+    """Wake main PC (WoL) and start the CyberTiel llama-server.
+
+    Delegates to ~/bin/wake-main.sh, which handles WoL + the on-demand
+    scheduled task + health polling. Exit 0 when serving, 1 on timeout.
+    """
+    _log(LOG, "START MAIN — waking main PC + llama-server")
+    r = _run(["bash", "-c", "export PATH='{}:$PATH'; ~/bin/wake-main.sh".format(ENV["PATH"])],
+             timeout=330)
+    out = (r.stdout.strip() if r else "").splitlines()
+    if r and r.returncode == 0:
+        last = out[-1] if out else "up"
+        _log(LOG, f"  -> {last}")
+        return {"ok": True, "detail": last}
+    _log(LOG, f"  -> FAILED ({r.stderr if r else 'no output'}: {r.returncode if r else 'unknown'})")
+    return {"ok": False, "detail": out[-1] if out else "wake-main.sh failed",
+            "stderr": (r.stderr or "")[:300] if r else ""}
+
+
+def stop_llama() -> dict:
+    """Stop the CyberTiel llama-server on main (keeps the box running).
+
+    Kills llama-server.exe on main; the on-demand scheduled task will
+    restart it later if anything launches it.
+    """
+    _log(LOG, "STOP LLAMA — stopping llama-server.exe on main")
+    r = _run(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "main-ts",
+              "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | "
+              "Where-Object { $_.Name -match 'llama-server.exe' } | "
+              "ForEach-Object { Stop-CimInstance -InputObject $_ -ErrorAction SilentlyContinue }\""],
+             timeout=30)
+    if r and r.returncode == 0:
+        _log(LOG, "  -> llama-server.exe stopped")
+        return {"ok": True, "detail": "llama-server.exe stopped"}
+    _log(LOG, f"  -> error ({r.stderr if r else 'no output'}: {r.returncode if r else 'unknown'})")
+    return {"ok": False, "detail": "stop failed",
+            "stderr": (r.stderr or "")[:300] if r else ""}
+
+
+def shutdown_main() -> dict:
+    """Shut down the main PC cleanly (shutdown /s /t 0)."""
+    _log(LOG, "SHUTDOWN MAIN — graceful shutdown")
+    r = _run(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "main-ts",
+              "shutdown /s /t 0 /f /c \"Safeguard: graceful shutdown\""],
+             timeout=20)
+    if r and r.returncode == 0:
+        _log(LOG, "  -> shutdown command sent")
+        return {"ok": True, "detail": "shutdown command sent"}
+    _log(LOG, f"  -> error ({r.stderr if r else 'no output'}: {r.returncode if r else 'unknown'})")
+    return {"ok": False, "detail": "shutdown failed",
+            "stderr": (r.stderr or "")[:300] if r else ""}
+
+
+def list_main_actions() -> list[dict]:
+    """Main-PC actions for the dashboard panel. Returns list of dicts with
+    {label, btn, endpoint, payload, confirm, status}."""
+    return [
+        {"label": "Wake main + llama-server", "btn": "Wake",
+         "endpoint": "/api/main/start", "payload": {}, "confirm":
+         "Wake main PC and start the CyberTiel llama-server?", "status": "on-demand"},
+        {"label": "Stop llama-server", "btn": "Stop llama",
+         "endpoint": "/api/main/stop", "payload": {}, "confirm":
+         "Stop the CyberTiel llama-server on main? (box stays on)", "status": "running"},
+        {"label": "Shutdown main", "btn": "Shutdown",
+         "endpoint": "/api/main/shutdown", "payload": {}, "confirm":
+         "Shut down main PC? It will need WoL to wake again.", "status": "up"},
+    ]
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="Safeguard actions")

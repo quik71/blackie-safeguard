@@ -31,7 +31,6 @@ SERVICES = [
     ("Neo4j",            "neo4j.service",            None, 7687, "neo4j"),
     ("IB Gateway",       None,                       None, 4002, "org.jtrader"),
     ("Factorio",         "factorio.service",         None, None, "factorio"),
-    ("Tailscale",        "tailscaled.service",       None, None, "tailscaled"),
     ("Firecrawl API",    None,                       None, 3002, "api.js"),
 ]
 
@@ -191,11 +190,71 @@ def check_wal_frozen() -> dict:
         return {"label": "state.db WAL", "status": "unknown", "detail": "stat failed"}
 
 
+def check_array() -> dict:
+    """Array health + usage.
+
+    /srv/storage is a bind mount of /dev/md0 (RAID10, 4 drives). We check the
+    mdadm level/health (all components must be active) and the filesystem usage.
+    A degraded RAID (missing/copying component) is red regardless of free space.
+    """
+    label = "Array (md0)"
+    status = "unknown"
+    detail = ""
+
+    # 1) mdadm health — authoritative for RAID state
+    r = _run(["sudo", "-n", "mdadm", "--detail", "/dev/md0"])
+    level = "unknown"
+    degraded = None
+    if r and r.returncode == 0:
+        out = r.stdout
+        for line in out.splitlines():
+            low = line.lower().strip()
+            if low.startswith("raid level"):
+                level = line.split(":", 1)[1].strip()
+            elif low.startswith("state"):
+                degraded = line.split(":", 1)[1].strip().lower()
+        # degraded/copying/active — active+clean is the only fully-green state
+        if degraded == "active" or degraded == "clean":
+            status = "green"
+            detail = f"{level} · healthy"
+        elif degraded == "degraded":
+            status = "red"
+            detail = f"{level} · DEGRADED"
+        elif degraded and ("copying" in degraded or "resync" in degraded):
+            status = "yellow"
+            detail = f"{level} · {degraded}"
+        else:
+            status = "unknown"
+            detail = f"{level} · state={degraded}"
+
+    # 2) usage — best-effort, never overrides a red/green health verdict
+    try:
+        s = shutil.disk_usage("/srv/storage")
+        pct = round(s.used / s.total * 100, 1)
+        used_g = round(s.used / 10**9, 1)
+        total_g = round(s.total / 10**9, 1)
+        usage_detail = f"{pct}% used ({used_g}G / {total_g}G)"
+        if status == "unknown":
+            status = "green"
+            detail = f"{level} · healthy"
+        detail = f"{detail} · {usage_detail}" if detail else usage_detail
+        # usage-only warning: space running low
+        if status == "green" and pct >= 95:
+            status = "red"
+        elif status == "green" and pct >= 85:
+            status = "yellow"
+    except OSError:
+        pass
+
+    return {"label": label, "status": status, "detail": detail}
+
+
 def full_report() -> dict:
     services = check_services()
     ts = check_tailscale()
     services.append(ts)
     services.append(check_disk())
+    services.append(check_array())
     services.append(check_wal_frozen())
     backups = check_backups()
     counts = {"green": 0, "red": 0, "yellow": 0, "unknown": 0}

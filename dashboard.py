@@ -129,6 +129,10 @@ HTML = """<!doctype html>
     <div id="actions"></div>
   </div>
 
+  <div class="panel"><h2>Main PC — wake / stop llama / shutdown</h2>
+    <div id="main-actions"></div>
+  </div>
+
   <div class="panel"><h2>Activity Log</h2>
     <div class="log" id="log"></div>
   </div>
@@ -178,6 +182,18 @@ async function load(){
       div.appendChild(lbl);div.appendChild(st);div.appendChild(btn);
       ar.appendChild(div);
     });
+    // main-PC actions panel
+    const mr=document.getElementById('main-actions');
+    mr.innerHTML='';
+    ed.mainActions.forEach(a=>{
+      const div=document.createElement('div');div.className='action-row';
+      const lbl=document.createElement('div');lbl.className='lbl';lbl.textContent=a.label;
+      const st=document.createElement('div');st.className='st';st.textContent=a.detail||a.status||'';
+      const btn=document.createElement('button');btn.className='btn small';btn.textContent=a.btn;
+      btn.onclick=()=>doMain(a);
+      div.appendChild(lbl);div.appendChild(st);div.appendChild(btn);
+      mr.appendChild(div);
+    });
     // restore dropdown
     const sel=document.getElementById('restore-select');
     sel.innerHTML='';
@@ -209,6 +225,16 @@ function doRestart(a){
     btn.disabled=false;btn.textContent='Restart';
     if(r.ok){banner(a.label+' restarted (now '+r.after+')','ok');}
     else{banner(a.label+' restart failed: '+r.after,'err');}
+    load();
+  }).catch(e=>{banner('Error: '+e.message,'err');});
+}
+function doMain(a){
+  if(!confirm(a.confirm||('Run '+a.label+'?')))return;
+  const btn=event.target;btn.disabled=true;btn.textContent='Working…';
+  postJSON(a.endpoint,a.payload).then(r=>{
+    btn.disabled=false;btn.textContent=a.btn;
+    if(r.ok){banner(a.label+' — '+r.detail,'ok');}
+    else{banner(a.label+' failed: '+r.detail,'err');}
     load();
   }).catch(e=>{banner('Error: '+e.message,'err');});
 }
@@ -259,6 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                     "events": events.events(limit=100),
                     "counts": events.counts(),
                     "actions": actions.list_restartable(),
+                    "mainActions": actions.list_main_actions(),
                     "backups": actions.list_backups_all(),
                 })
             except Exception as e:
@@ -293,6 +320,21 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 self._json(actions.restore_backup(backup_dir))
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+        elif self.path == "/api/main/start":
+            try:
+                self._json(actions.start_main())
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+        elif self.path == "/api/main/stop":
+            try:
+                self._json(actions.stop_llama())
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+        elif self.path == "/api/main/shutdown":
+            try:
+                self._json(actions.shutdown_main())
             except Exception as e:
                 self._json({"error": str(e)}, 500)
         else:

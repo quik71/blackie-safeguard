@@ -1,0 +1,8 @@
+2026-09-24 09:54:22 RESTART Factorio (was active)
+2026-09-24 09:54:27   -> ACTIVE (restart rc=None)
+2026-09-24 13:41:47 RESTART Tailscale (was active)
+2026-09-24 13:41:52   -> ACTIVE (restart rc=None)
+2026-09-24 13:52:34 START MAIN — waking main PC + llama-server
+2026-09-24 13:52:34   -> CyberTiel llama-server on main is already up.
+2026-09-24 13:52:40 STOP LLAMA — stopping llama-server.exe on main
+2026-09-24 13:52:41   -> llama-server.exe stopped
