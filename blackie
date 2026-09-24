@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# blackie — the one-command safety net.
+# Run from anywhere. Plain-English menu, no Linux knowledge needed.
+#   blackie        → show status menu
+#   blackie doctor → scan + auto-heal + page Mike if something needs a human
+#   blackie update → pull Safeguard updates from git
+#   blackie help   → this menu
+set -uo pipefail
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+SAFE="$HOME/.hermes/safeguard"
+PY=python3
+cd "$SAFE" 2>/dev/null || { echo "Safeguard dir missing. Run: blackie help"; exit 1; }
+
+cmd="${1:-menu}"
+shift || true
+
+case "$cmd" in
+  menu|status|health)
+    $PY health.py menu
+    ;;
+  doctor|fix)
+    $PY doctor.py --auto
+    ;;
+  check)
+    $PY doctor.py --check-only
+    ;;
+  restore)
+    echo "=== Available backups (last 7 days) ==="
+    $PY health.py 2>&1 | $PY -c 'import sys,json; d=json.load(sys.stdin); [print(f"  {i+1}) {n}") for i,n in enumerate(d["backups"]["list"])]'
+    echo "Then run:  hermes-restore.sh <number or full path>"
+    echo "  e.g.  hermes-restore.sh list   →   hermes-restore.sh restore 20260924-0200AM"
+    ;;
+  tailscale|net)
+    echo "=== Tailscale ==="
+    tailscale status 2>&1 | head -12
+    echo "Autoconnect on boot: $(tailscale status --json 2>/dev/null | $PY -c 'import sys,json;print("yes" if json.load(sys.stdin).get("Self",{}).get("Online") else "checking")' 2>/dev/null || echo "up?")"
+    ;;
+  update)
+    echo "=== Updating Safeguard ==="
+    cd "$SAFE"
+    git pull --ff-only 2>&1 || echo "(not a git repo, or already up to date — run: cd $SAFE && git init && git add -A && git commit -m init)"
+    ;;
+  help|-h|--help)
+    cat <<'EOF'
+BLACKIE — the safety net. Commands:
+  blackie                 Show box status (green/red/yellow)
+  blackie doctor          Scan + auto-heal dead services, page you if needed
+  blackie check           Show status only, no fixes
+  blackie restore         List last 7 days of backups, then restore one
+  blackie tailscale       Show tailnet + connected devices
+  blackie update          Pull Safeguard updates from git
+  blackie help            This menu
+
+Quick emergency: if things are broken, just run  blackie doctor
+Dashboard over Tailscale: http://100.94.103.75:8080
+EOF
+    ;;
+  *)
+    echo "Unknown command: $cmd"
+    blackie help
+    ;;
+esac
