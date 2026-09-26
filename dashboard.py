@@ -123,7 +123,7 @@ HTML = """<!doctype html>
 </style></head><body><div class="wrap">
   <h1>🛡️ Blackie Safeguard</h1>
   <div class="sub">Auto-recovery · backup restore · operations center ·
-     last update <span id="ts"></span></div>
+     last update <span id="ts"></span> · <span id="live" style="display:none;color:var(--ok)">● live polling</span></div>
 
   <div class="banner" id="banner"></div>
 
@@ -439,38 +439,65 @@ async function viewLog(){
 function doRestart(a){
   if(!confirm('Restart '+a.label+'?'))return;
   const btn=event.target;btn.disabled=true;btn.textContent='Restarting…';
+  startRapid();
   postJSON('/api/restart',{unit:a.unit,user:a.user}).then(r=>{
     btn.disabled=false;btn.textContent='Restart';
+    stopRapid();
     if(r.ok){banner(a.label+' restarted (now '+r.after+')','ok');}
     else{banner(a.label+' restart failed: '+r.after,'err');}
     load();
-  }).catch(e=>{banner('Error: '+e.message,'err');});
+  }).catch(e=>{stopRapid();banner('Error: '+e.message,'err');});
 }
 function doMain(a){
   if(!confirm(a.confirm||('Run '+a.label+'?')))return;
   const btn=event.target;btn.disabled=true;btn.textContent='Working…';
+  startRapid();
   postJSON(a.endpoint,a.payload).then(r=>{
     btn.disabled=false;btn.textContent=a.btn;
+    stopRapid();
     if(r.ok){banner(a.label+' — '+r.detail,'ok');}
     else{banner(a.label+' failed: '+r.detail,'err');}
     load();
-  }).catch(e=>{banner('Error: '+e.message,'err');});
+  }).catch(e=>{stopRapid();banner('Error: '+e.message,'err');});
 }
 function doRestore(){
   const name=document.getElementById('restore-select').value;
   if(!confirm('Restore from '+name+'?\\n\\nThis replaces ~/.hermes after verifying the backup. Continue?'))return;
   const btn=document.getElementById('restore-btn');btn.disabled=true;btn.textContent='Restoring…';
+  startRapid();
   postJSON('/api/restore',{backup_dir:'/home/blackieserver/hermes-backups/'+name}).then(r=>{
     btn.disabled=false;btn.textContent='Restore Selected';
+    stopRapid();
     if(r.ok){banner('Restore '+r.step+' complete. Gateway: '+r.gateway,'ok');}
     else{banner('Restore failed at '+r.step+': '+(r.error||'unknown'),'err');}
     load();
-  }).catch(e=>{banner('Error: '+e.message,'err');});
+  }).catch(e=>{stopRapid();banner('Error: '+e.message,'err');});
+}
+// ---- polling: idle 20s, fast (2s) only while an action runs ----
+// Idle polling stays at 20s so we don't reach out to main (full_report SSHes it)
+// or hammer the dashboard while nothing is happening. Clicking a button swaps to
+// 2s so the Activity Log shows live recovery progress, and reverts when it ends.
+let idleId = null, rapidId = null, rapidTimer = null;
+const RAPID_MS = 2000;
+const RAPID_MAX_MS = 360000; // 6 min cap: a hung request can't loop forever
+const IDLE_MS = 300000; // 5 min idle — no point reaching out to main while nothing's happening
+function startRapid(){
+  if (rapidId) return;
+  clearInterval(idleId);
+  rapidId = setInterval(load, RAPID_MS);
+  document.getElementById('live').style.display='inline';
+  rapidTimer = setTimeout(stopRapid, RAPID_MAX_MS);
+}
+function stopRapid(){
+  if (!rapidId && !rapidTimer) return;
+  if (rapidId) { clearInterval(rapidId); rapidId = null; idleId = setInterval(load, IDLE_MS); }
+  if (rapidTimer) { clearTimeout(rapidTimer); rapidTimer = null; }
+  document.getElementById('live').style.display='none';
 }
 document.getElementById('cron-job-sel').onchange=e=>selectJob(e.target.value,true);
 document.getElementById('cron-run-sel').onchange=viewSelected;
+idleId = setInterval(load, IDLE_MS);
 load();
-setInterval(load, 20000);
 </script></body></html>"""
 
 
