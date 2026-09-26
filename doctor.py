@@ -105,29 +105,19 @@ def recover_tailscale():
 
 
 def page_telegram(text: str):
-    """Send a Telegram alert. Best-effort; failures don't crash the doctor."""
-    env_path = HERMES_HOME / ".env"
-    env = {}
-    if env_path.exists():
-        for line in env_path.read_text(errors="ignore").splitlines():
-            line = line.strip()
-            if "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip().strip('"')
-    token = env.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat = env.get("TELEGRAM_BACKUP_NOTIFY_CHAT") or env.get("TELEGRAM_HOME_CHANNEL") or "7013102764"
-    if not token:
-        log("Telegram: no token, skipping alert")
-        return False
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = urllib.parse.urlencode({"chat_id": chat, "text": f"[SAFEGUARD] {text}"}).encode()
-    try:
-        with urllib.request.urlopen(url, data=payload, timeout=10) as r:
-            log(f"Telegram alert sent (status {r.status})")
-            return True
-    except Exception as e:
-        log(f"Telegram send failed: {e}")
-        return False
+    """Send an alert to the safeguard alert log via the shared notify path.
+
+    Telegram was retired 2026-09-26; all blackie alerts now funnel through
+    bin/notify-hermes.sh (optional ntfy push + always-on alerts.log). Best-effort;
+    failures don't crash the doctor. Kept as page_telegram() so callers are
+    unchanged and the name reads honestly at the call site.
+    """
+    r = _run(["/home/blackieserver/bin/notify-hermes.sh", text])
+    if r and r.returncode == 0:
+        log(f"Alert sent to safeguard log (status {r.returncode})")
+        return True
+    log("Alert delivery failed")
+    return False
 
 
 def doctor(auto: bool = False) -> dict:

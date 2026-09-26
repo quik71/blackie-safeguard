@@ -88,7 +88,6 @@ def events(limit: int | None = None) -> list[dict]:
     # start, health polling) — including wake-main.sh's own untimestamped
     # progress lines. Read the tail only; capped so a long wake can't bloat the feed.
     chunks += _read_log(HERMES_HOME / "logs" / "main-llama-watchdog.log", "main-llama", 500)
-    chunks += _read_log(SAFE / "telegram.log", "telegram", None)
 
     # newest first; stable sort by timestamp desc
     chunks.sort(key=lambda e: e["ts"], reverse=True)
