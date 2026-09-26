@@ -29,6 +29,7 @@ import health  # noqa: E402
 import actions  # noqa: E402
 import events  # noqa: E402
 import cronfeed  # noqa: E402
+import alerts  # noqa: E402
 
 
 # ---- HTML ------------------------------------------------------------------
@@ -150,6 +151,17 @@ HTML = """<!doctype html>
     <div id="actions"></div>
   </div>
 
+  <div class="panel"><h2>Alerts — newest first</h2>
+    <div id="alert-head" class="tip" style="margin:0 0 10px"></div>
+    <div class="log" id="alerts"></div>
+    <div class="cronbar">
+      <select id="alert-src-sel" aria-label="Log file"></select>
+      <button class="btn small" onclick="viewLog()">View log</button>
+    </div>
+    <pre class="runout" id="alert-log">Pick a log above and press View log.</pre>
+    <div class="tip" id="alert-log-meta"></div>
+  </div>
+
   <div class="panel"><h2>Main PC — wake / stop llama / shutdown</h2>
     <div id="main-actions"></div>
   </div>
@@ -185,10 +197,11 @@ async function postJSON(url,data){
 }
 async function load(){
   try{
-    const [hd,ed,cd]=await Promise.all([
+    const [hd,ed,cd,ad]=await Promise.all([
       fetch('/api/health').then(r=>r.json()),
       fetch('/api/events').then(r=>r.json()),
-      fetch('/api/cron').then(r=>r.json())]);
+      fetch('/api/cron').then(r=>r.json()),
+      fetch('/api/alerts').then(r=>r.json())]);
     const dot=document.getElementById('dot');
     dot.className='dot '+hd.overall;
     document.getElementById('status').textContent=
@@ -251,6 +264,8 @@ async function load(){
     });
     // cron job output panel
     renderCron(cd);
+    // alerts panel (read straight out of the watchdog logs)
+    renderAlerts(ad);
   }catch(err){
     banner('Failed to load: '+err.message,'err');
   }
@@ -360,6 +375,67 @@ async function viewRun(jobId,file,jobName){
     out.textContent='Failed to load '+file+': '+e.message;
   }
 }
+// ---- alerts: the watchdogs write to their logs, the site reads them ----
+let LOGSRC='';
+function renderAlerts(ad){
+  const box=document.getElementById('alerts');
+  box.innerHTML=''; // clear only; all values below use textContent
+  const c=ad.counts||{};
+  const nw=ad.newest;
+  const head=document.getElementById('alert-head');
+  if(c.error||c.warn){
+    head.textContent=c.error+' error'+(c.error===1?'':'s')+' · '+c.warn+' warning'
+      +(c.warn===1?'':'s')+' · showing '+ad.alerts.length+' of '+ad.total
+      +' alert-worthy lines'
+      +(nw?(' · newest '+nw.ts+' ('+nw.label+')'):'');
+  }else{
+    head.textContent='Nothing alert-worthy in any log — which is the state you want.'
+      +(nw?(' Last alert: '+nw.ts+' — '+nw.label):'');
+  }
+  head.style.color=(c.error?'var(--bad)':(c.warn?'var(--warn)':'var(--ok)'));
+  (ad.alerts||[]).forEach(a=>{
+    const div=document.createElement('div');
+    div.className='ev '+((a.level==='ok')?'success':a.level);
+    div.style.cursor='pointer';div.title='Click to read this log file';
+    const ts=document.createElement('span');ts.className='ts';ts.textContent=a.ts||'—';
+    const src=document.createElement('span');src.className='src';src.textContent='['+a.label+']';
+    const msg=document.createElement('span');msg.textContent=a.message;
+    div.appendChild(ts);div.appendChild(src);div.appendChild(msg);
+    div.onclick=()=>{
+      document.getElementById('alert-src-sel').value=a.source;
+      viewLog();
+    };
+    box.appendChild(div);
+  });
+  const sel=document.getElementById('alert-src-sel');
+  sel.innerHTML=''; // clear only; all values below use textContent
+  (ad.sources||[]).forEach(s=>{
+    const o=document.createElement('option');o.value=s.source;
+    o.textContent=s.label+'  ('+s.alerts+' alerts'+(s.exists?'':', missing')+')';
+    sel.appendChild(o);
+  });
+  if(!LOGSRC)LOGSRC=((ad.sources||[])[0]||{}).source||'';
+  sel.value=LOGSRC;
+}
+async function viewLog(){
+  const sel=document.getElementById('alert-src-sel');
+  if(!sel||!sel.value)return;
+  LOGSRC=sel.value;
+  const out=document.getElementById('alert-log');
+  out.textContent='Loading …';
+  try{
+    const r=await fetch('/api/alerts/source?name='+encodeURIComponent(LOGSRC)
+                        +'&lines=250').then(x=>x.json());
+    if(!r.ok){out.textContent='Error: '+(r.error||'unknown');
+      document.getElementById('alert-log-meta').textContent='';return;}
+    out.textContent=r.text||'(this log is empty)';
+    document.getElementById('alert-log-meta').textContent=r.label+' · '+r.path
+      +' · showing last '+r.lines_shown+' of '+r.lines_in_tail
+      +' tail lines · '+(r.size/1024).toFixed(1)+' KB on disk';
+  }catch(e){
+    out.textContent='Failed to read '+LOGSRC+': '+e.message;
+  }
+}
 function doRestart(a){
   if(!confirm('Restart '+a.label+'?'))return;
   const btn=event.target;btn.disabled=true;btn.textContent='Restarting…';
@@ -439,6 +515,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(cronfeed.jobs_overview())
             except Exception as e:
                 self._json({"error": str(e)}, 500)
+        elif self.path == "/api/alerts":
+            try:
+                self._json(alerts.feed())
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+        elif self.path.startswith("/api/alerts/source"):
+            from urllib.parse import parse_qs, urlparse
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                self._json(alerts.tail((q.get("name") or [""])[0],
+                                       (q.get("lines") or [alerts.RAW_TAIL_LINES])[0]))
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)}, 500)
         elif self.path.startswith("/api/cron/output"):
             from urllib.parse import parse_qs, urlparse
             try:
