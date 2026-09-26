@@ -1,3 +1,6 @@
 doctor.log
 __pycache__/
 *.pyc
+actions.log
+restore.log
+telegram.log
