@@ -85,6 +85,21 @@ def _proc_running(name: str) -> bool:
     return bool(r and r.returncode == 0)
 
 
+def _fmt_uptime(seconds: float) -> str:
+    """Human 'Xd Yh Zm Ws' — largest non-zero unit first, always down to seconds."""
+    seconds = int(seconds)
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    m, s = divmod(rem, 60)
+    if d:
+        return f"{d}d {h}h {m}m {s}s"
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
 def check_services() -> list[dict]:
     out = []
     for label, unit, bind_host, port, proc in SERVICES:
@@ -201,21 +216,31 @@ def check_main() -> dict:
         return {"label": label, "status": "unknown",
                 "detail": "main unreachable (on-demand)"
                           + (" · parked" if held else "")}
+    uptime = None
+    try:
+        r = _run(["ssh", "-o", "ConnectTimeout=3", "-o", "BatchMode=yes",
+                  "main-ts", "cut -d' ' -f1 /proc/uptime"], timeout=6)
+        if r and r.returncode == 0:
+            uptime = _fmt_uptime(float(r.stdout.split()[0]))
+    except (ValueError, OSError):
+        uptime = None
     serving = False
     try:
         with urllib.request.urlopen(MAIN_HEALTH, timeout=3) as r:
             serving = getattr(r, "status", 200) == 200
     except Exception:
         serving = False
+    up_detail = ("up " + uptime) if uptime else "up unknown"
+    up_detail += (" · parked (hold set)" if held else "")
     if serving:
         return {"label": label, "status": "green",
-                "detail": "llama-server serving"
+                "detail": f"{up_detail} · llama-server serving"
                           + (" · HOLD set (a restart request will be refused)" if held else "")}
     if held:
         return {"label": label, "status": "yellow",
-                "detail": "parked by operator (hold set) — watchdog will not restart it"}
+                "detail": f"{up_detail} — parked by operator (hold set); watchdog will not restart it"}
     return {"label": label, "status": "yellow",
-            "detail": "main up, llama-server NOT answering"}
+            "detail": f"{up_detail} — llama-server NOT answering"}
 
 
 def check_wal_frozen() -> dict:
@@ -295,11 +320,24 @@ def check_array() -> dict:
     return {"label": label, "status": status, "detail": detail}
 
 
+def check_uptime() -> dict:
+    """Blackie host uptime — days/hours/minutes/seconds. Non-blocking."""
+    try:
+        with open("/proc/uptime") as fh:
+            secs = float(fh.read().split()[0])
+        return {"label": "Blackie uptime", "status": "green",
+                "detail": "up " + _fmt_uptime(secs)}
+    except (OSError, ValueError):
+        return {"label": "Blackie uptime", "status": "unknown",
+                "detail": "uptime read failed"}
+
+
 def full_report() -> dict:
     services = check_services()
     ts = check_tailscale()
     services.append(ts)
     services.append(check_main())
+    services.append(check_uptime())
     services.append(check_disk())
     services.append(check_array())
     services.append(check_wal_frozen())
