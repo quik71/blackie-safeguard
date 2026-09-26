@@ -50,29 +50,34 @@ def _parse_line(line: str, source: str) -> dict | None:
     return {"ts": ts, "level": level, "source": source, "message": msg.strip()}
 
 
-def _read_log(path: Path, source: str, limit: int) -> list[dict]:
+def _read_log(path: Path, source: str, limit: int | None = None) -> list[dict]:
     if not path.exists():
         return []
     try:
         lines = path.read_text(errors="ignore").splitlines()
     except OSError:
         return []
+    if limit is not None:
+        lines = lines[-limit:]
     out = []
-    for line in lines[-limit:]:
+    for line in lines:
         ev = _parse_line(line, source)
         if ev:
             out.append(ev)
     return out
 
 
-def events(limit: int = 50) -> list[dict]:
-    """Return unified timeline (newest first), capped at `limit`."""
+def events(limit: int | None = None) -> list[dict]:
+    """Return unified timeline (newest first), capped at `limit`.
+
+    limit=None returns every event across all safeguard logs.
+    """
     chunks = []
-    chunks += _read_log(SAFE / "doctor.log", "doctor", 40)
-    chunks += _read_log(SAFE / "actions.log", "actions", 25)
-    chunks += _read_log(SAFE / "restore.log", "restore", 25)
-    chunks += _read_log(SAFE / "safeguard-watchdog.log", "watchdog", 20)
-    chunks += _read_log(SAFE / "telegram.log", "telegram", 15)
+    chunks += _read_log(SAFE / "doctor.log", "doctor", None)
+    chunks += _read_log(SAFE / "actions.log", "actions", None)
+    chunks += _read_log(SAFE / "restore.log", "restore", None)
+    chunks += _read_log(SAFE / "safeguard-watchdog.log", "watchdog", None)
+    chunks += _read_log(SAFE / "telegram.log", "telegram", None)
 
     # newest first; stable sort by timestamp desc
     chunks.sort(key=lambda e: e["ts"], reverse=True)

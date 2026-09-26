@@ -20,6 +20,10 @@ HOME = Path.home()
 HERMES_HOME = HOME / ".hermes"
 BACKUP_ROOT = HOME / "hermes-backups"
 MIRROR_ROOT = Path("/srv/storage/backups/hermes")
+# main PC (on-demand) — never allow a slow/hung probe to hold up the dashboard
+MAIN_HOST = "100.79.16.35"
+MAIN_HEALTH = f"http://{MAIN_HOST}:8000/health"
+MAIN_HOLD = HERMES_HOME / "state" / "main-llama-hold"
 RUNTIME_DIR = f"/run/user/{os.getuid()}"
 ENV = dict(os.environ)
 ENV["XDG_RUNTIME_DIR"] = RUNTIME_DIR
@@ -172,6 +176,48 @@ def check_disk() -> dict:
         return {"label": "Root disk", "status": "unknown", "detail": "stat failed"}
 
 
+def check_main() -> dict:
+    """Main PC + CyberTiel model state — strictly non-blocking.
+
+    The dashboard must never depend on main being up (main is on-demand by
+    design and gets parked on purpose), so every probe here has a tight timeout
+    and every failure degrades to a neutral verdict instead of a fault:
+      green   — main up, model serving
+      yellow  — main up, model parked (hold set) or not answering
+      unknown — main unreachable: asleep/off, not a fault
+    """
+    import socket
+    import urllib.request
+
+    label = "Main PC · CyberTiel"
+    held = MAIN_HOLD.exists()
+    up = False
+    try:
+        with socket.create_connection((MAIN_HOST, 22), timeout=2):
+            up = True
+    except OSError:
+        up = False
+    if not up:
+        return {"label": label, "status": "unknown",
+                "detail": "main unreachable (on-demand)"
+                          + (" · parked" if held else "")}
+    serving = False
+    try:
+        with urllib.request.urlopen(MAIN_HEALTH, timeout=3) as r:
+            serving = getattr(r, "status", 200) == 200
+    except Exception:
+        serving = False
+    if serving:
+        return {"label": label, "status": "green",
+                "detail": "llama-server serving"
+                          + (" · HOLD set (a restart request will be refused)" if held else "")}
+    if held:
+        return {"label": label, "status": "yellow",
+                "detail": "parked by operator (hold set) — watchdog will not restart it"}
+    return {"label": label, "status": "yellow",
+            "detail": "main up, llama-server NOT answering"}
+
+
 def check_wal_frozen() -> dict:
     """Detect the state.db WAL freeze (the one thing that's bitten us)."""
     db = HERMES_HOME / "state.db"
@@ -253,6 +299,7 @@ def full_report() -> dict:
     services = check_services()
     ts = check_tailscale()
     services.append(ts)
+    services.append(check_main())
     services.append(check_disk())
     services.append(check_array())
     services.append(check_wal_frozen())

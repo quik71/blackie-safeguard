@@ -30,6 +30,26 @@ ENV["PATH"] = f"{HERMES_HOME}/hermes-agent/venv/bin:{HERMES_HOME}/hermes-agent/n
 LOG = HERMES_HOME / "safeguard" / "actions.log"
 RESTORE_LOG = HERMES_HOME / "safeguard" / "restore.log"
 RUNTIME_DIR = f"/run/user/{os.getuid()}"
+# Operator hold: main's CyberTiel model is parked on purpose. Written by the
+# Stop action, honoured by wake-main.sh + main-llama-watchdog.sh, cleared only
+# by an explicit start. Prevents auto-recovery from fighting a deliberate stop.
+HOLD_PATH = HERMES_HOME / "state" / "main-llama-hold"
+
+
+def main_held() -> bool:
+    return HOLD_PATH.exists()
+
+
+def set_main_hold(reason: str) -> None:
+    HOLD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HOLD_PATH.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {reason}\n")
+
+
+def clear_main_hold() -> None:
+    try:
+        HOLD_PATH.unlink()
+    except OSError:
+        pass
 
 
 def _log(path: Path, msg: str):
@@ -172,7 +192,10 @@ def start_main() -> dict:
     scheduled task + health polling. Exit 0 when serving, 1 on timeout.
     """
     _log(LOG, "START MAIN — waking main PC + llama-server")
-    r = _run(["bash", "-c", "export PATH='{}:$PATH'; ~/bin/wake-main.sh".format(ENV["PATH"])],
+    # Pressing Wake is an explicit human start, so it RELEASES any operator hold
+    # and passes --force (a parked model stays parked otherwise).
+    clear_main_hold()
+    r = _run(["bash", "-c", "export PATH='{}:$PATH'; ~/bin/wake-main.sh --force".format(ENV["PATH"])],
              timeout=330)
     out = (r.stdout.strip() if r else "").splitlines()
     if r and r.returncode == 0:
@@ -185,20 +208,23 @@ def start_main() -> dict:
 
 
 def stop_llama() -> dict:
-    """Stop the CyberTiel llama-server on main (keeps the box running).
+    """Park the CyberTiel llama-server on main (keeps the box running).
 
-    Kills llama-server.exe on main; the on-demand scheduled task will
-    restart it later if anything launches it.
+    Kills llama-server.exe AND sets the operator hold, so the deliberate stop
+    sticks: main-llama-watchdog.sh and wake-main.sh both refuse to restart a
+    held model, and the dashboard reports it as parked instead of broken.
+    Cleared by Wake (or `wake-main.sh --force`).
     """
     _log(LOG, "STOP LLAMA — stopping llama-server.exe on main")
     r = _run(["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes", "main-ts",
-              "powershell -NoProfile -Command \"Get-CimInstance Win32_Process | "
-              "Where-Object { $_.Name -match 'llama-server.exe' } | "
-              "ForEach-Object { Stop-CimInstance -InputObject $_ -ErrorAction SilentlyContinue }\""],
+              "powershell -NoProfile -Command \"Get-Process -Name llama-server -ErrorAction "
+              "SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue\""],
              timeout=30)
     if r and r.returncode == 0:
-        _log(LOG, "  -> llama-server.exe stopped")
-        return {"ok": True, "detail": "llama-server.exe stopped"}
+        set_main_hold("parked from the safeguard dashboard")
+        _log(LOG, "  -> llama-server.exe stopped; HOLD set (auto-recovery will not restart it)")
+        return {"ok": True,
+                "detail": "llama-server.exe parked — hold set, watchdog will not restart it"}
     _log(LOG, f"  -> error ({r.stderr if r else 'no output'}: {r.returncode if r else 'unknown'})")
     return {"ok": False, "detail": "stop failed",
             "stderr": (r.stderr or "")[:300] if r else ""}
@@ -221,16 +247,21 @@ def shutdown_main() -> dict:
 def list_main_actions() -> list[dict]:
     """Main-PC actions for the dashboard panel. Returns list of dicts with
     {label, btn, endpoint, payload, confirm, status}."""
+    held = main_held()
     return [
         {"label": "Wake main + llama-server", "btn": "Wake",
          "endpoint": "/api/main/start", "payload": {}, "confirm":
-         "Wake main PC and start the CyberTiel llama-server?", "status": "on-demand"},
-        {"label": "Stop llama-server", "btn": "Stop llama",
+         "Wake main PC and start the CyberTiel llama-server?",
+         "status": "clears the hold" if held else "on-demand"},
+        {"label": "Park llama-server", "btn": "Stop llama",
          "endpoint": "/api/main/stop", "payload": {}, "confirm":
-         "Stop the CyberTiel llama-server on main? (box stays on)", "status": "running"},
+         "Park the CyberTiel llama-server on main? (box stays on; the watchdog "
+         "will not restart it until you press Wake)",
+         "status": "PARKED (hold set)" if held else "running"},
         {"label": "Shutdown main", "btn": "Shutdown",
          "endpoint": "/api/main/shutdown", "payload": {}, "confirm":
-         "Shut down main PC? It will need WoL to wake again.", "status": "up"},
+         "Shut down main PC? It will need WoL to wake again.",
+         "status": "up"},
     ]
 
 

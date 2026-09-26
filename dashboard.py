@@ -3,14 +3,18 @@
 
     python3 dashboard.py [port]   (default 8080)
 
-Four panels:
-  1. Status      — health of every critical service (green/red/yellow)
+Five panels:
+  1. Status      — health of every critical service (green/red/yellow), including
+                   the on-demand main PC + CyberTiel model (never blocks on it)
   2. Restore     — dropdown of ALL restore points (newest first) + restore button
   3. Actions     — restart buttons per service (gateway, neo4j, factorio, tailscale)
-  4. Activity    — unified log timeline (doctor + actions + restore + watchdog)
+  4. Main PC     — wake / park llama / shutdown, hold-aware
+  5. Activity    — unified log timeline (doctor + actions + restore + watchdog)
+  6. Cron output — each job's recent runs, readable in-page
 
-Stdlib only. POST endpoints: /api/restart, /api/restore. The web UI confirms
-before destructive actions. Binds 0.0.0.0 so it's reachable over Tailscale.
+Stdlib only. POST endpoints: /api/restart, /api/restore, /api/main/{start,stop,shutdown}.
+GET: /api/health, /api/events, /api/cron, /api/cron/output?job=&file=. The web UI
+confirms before destructive actions. Binds 0.0.0.0 so it's reachable over Tailscale.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ sys.path.insert(0, str(SAFE))
 import health  # noqa: E402
 import actions  # noqa: E402
 import events  # noqa: E402
+import cronfeed  # noqa: E402
 
 
 # ---- HTML ------------------------------------------------------------------
@@ -96,6 +101,17 @@ HTML = """<!doctype html>
   .banner { padding:10px 14px; border-radius:10px; margin-bottom:16px;
             border:1px solid var(--line); background:var(--card2); font-size:13px;
             display:none; }
+  .jrow { display:flex; align-items:center; gap:10px; padding:9px 12px;
+          background:var(--card2); border:1px solid var(--line);
+          border-radius:10px; margin-bottom:6px; }
+  .jrow .jn { flex:1; min-width:0; font-size:13px; }
+  .jrow .jm { color:var(--muted); font-size:11px; font-family:monospace;
+              overflow-wrap:anywhere; }
+  .jrow select { width:auto; min-width:180px; padding:5px 8px; font-size:12px; }
+  .runout { background:#0b0f14; border:1px solid var(--line); border-radius:10px;
+            padding:12px; margin:10px 0 0; font-family:monospace; font-size:12px;
+            white-space:pre-wrap; overflow-wrap:anywhere; max-height:420px;
+            overflow-y:auto; color:var(--ink); }
   .banner.ok { border-color:var(--ok); color:var(--ok); }
   .banner.err { border-color:var(--bad); color:var(--bad); }
 </style></head><body><div class="wrap">
@@ -136,6 +152,16 @@ HTML = """<!doctype html>
   <div class="panel"><h2>Activity Log</h2>
     <div class="log" id="log"></div>
   </div>
+
+  <div class="panel"><h2>Cron job output</h2>
+    <div id="cron-jobs"></div>
+    <div class="tip">Every scheduled job with its recent runs, newest first. Pick a run
+      and press View — you get exactly what that run produced (a script's stdout/stderr,
+      or the agent's written reply). Runs that printed nothing are still listed, marked
+      <code>silent</code>.</div>
+    <pre class="runout" id="cron-out">No run selected — pick a run above and press View.</pre>
+    <div class="tip" id="cron-sel"></div>
+  </div>
 </div><script>
 const COLORS={green:'var(--ok)',red:'var(--bad)',yellow:'var(--warn)',unknown:'var(--muted)'};
 function banner(msg,type){
@@ -151,9 +177,10 @@ async function postJSON(url,data){
 }
 async function load(){
   try{
-    const [hd,ed]=await Promise.all([
+    const [hd,ed,cd]=await Promise.all([
       fetch('/api/health').then(r=>r.json()),
-      fetch('/api/events').then(r=>r.json())]);
+      fetch('/api/events').then(r=>r.json()),
+      fetch('/api/cron').then(r=>r.json())]);
     const dot=document.getElementById('dot');
     dot.className='dot '+hd.overall;
     document.getElementById('status').textContent=
@@ -214,8 +241,78 @@ async function load(){
       div.appendChild(ts);div.appendChild(src);div.appendChild(msg);
       log.appendChild(div);
     });
+    // cron job output panel
+    renderCron(cd);
   }catch(err){
     banner('Failed to load: '+err.message,'err');
+  }
+}
+// ---- cron job output ----
+// VIEW keeps the currently-open run alive across the 20 s auto-refresh, so the
+// panel doesn't yank the text you're reading out from under you.
+let VIEW={job:'',file:'',text:'',meta:''};
+function renderCron(cd){
+  const box=document.getElementById('cron-jobs');
+  box.innerHTML=''; // clear only; all values below use textContent
+  (cd.jobs||[]).forEach(j=>{
+    const row=document.createElement('div');row.className='jrow';
+    const info=document.createElement('div');info.className='jn';
+    const nm=document.createElement('div');nm.textContent=j.name;
+    const meta=document.createElement('div');meta.className='jm';
+    meta.textContent=[j.schedule, j.enabled?'enabled':'PAUSED', j.runs+' runs',
+      j.last_run_at?('last '+j.last_run_at.slice(0,16).replace('T',' ')):'',
+      j.deliver?('deliver: '+j.deliver):''].filter(Boolean).join(' · ');
+    info.appendChild(nm);info.appendChild(meta);
+    if(j.last_status){
+      const pill=document.createElement('div');
+      pill.className=(j.last_status==='ok')?'actok':'actbad';
+      pill.textContent='last: '+j.last_status;
+      info.appendChild(pill);
+    }
+    if(j.last_error||j.last_delivery_error){
+      const e2=document.createElement('div');e2.className='jm';
+      e2.textContent=('error: '+(j.last_error||j.last_delivery_error)).slice(0,200);
+      info.appendChild(e2);
+    }
+    row.appendChild(info);
+    const sel=document.createElement('select');sel.dataset.job=j.id;
+    if(!j.files.length){
+      const o=document.createElement('option');o.value='';o.textContent='no runs saved';
+      sel.appendChild(o);sel.disabled=true;
+    }else{
+      j.files.forEach(f=>{
+        const o=document.createElement('option');o.value=f.name;
+        o.textContent=f.name.replace('.md','')+'  ('+Math.max(1,Math.round(f.size/1024))+'K)';
+        sel.appendChild(o);
+      });
+      if(VIEW.job===j.id&&VIEW.file)sel.value=VIEW.file;
+    }
+    row.appendChild(sel);
+    const btn=document.createElement('button');btn.className='btn small';btn.textContent='View';
+    btn.disabled=!j.files.length;
+    btn.onclick=()=>viewRun(j.id,sel.value,j.name);
+    row.appendChild(btn);
+    box.appendChild(row);
+  });
+  const out=document.getElementById('cron-out');
+  out.textContent=VIEW.text||'No run selected — pick a run above and press View.';
+  document.getElementById('cron-sel').textContent=VIEW.meta;
+}
+async function viewRun(jobId,file,jobName){
+  if(!file)return;
+  const out=document.getElementById('cron-out');
+  out.textContent='Loading '+file+' …';
+  try{
+    const r=await fetch('/api/cron/output?job='+encodeURIComponent(jobId)
+                        +'&file='+encodeURIComponent(file)).then(x=>x.json());
+    if(!r.ok){VIEW={job:'',file:'',text:'',meta:''};out.textContent='Error: '+(r.error||'unknown');return;}
+    const note=r.truncated?'  [truncated — first 60 KB shown]':'';
+    VIEW={job:jobId,file:file,text:r.text+note,
+          meta:jobName+' · '+file+' · '+(r.text.length/1024).toFixed(1)+' KB'};
+    out.textContent=VIEW.text;
+    document.getElementById('cron-sel').textContent=VIEW.meta;
+  }catch(e){
+    out.textContent='Failed to load '+file+': '+e.message;
   }
 }
 function doRestart(a){
@@ -282,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/events":
             try:
                 self._json({
-                    "events": events.events(limit=100),
+                    "events": events.events(limit=100000),
                     "counts": events.counts(),
                     "actions": actions.list_restartable(),
                     "mainActions": actions.list_main_actions(),
@@ -290,6 +387,19 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._json({"error": str(e)}, 500)
+        elif self.path == "/api/cron":
+            try:
+                self._json(cronfeed.jobs_overview())
+            except Exception as e:
+                self._json({"error": str(e)}, 500)
+        elif self.path.startswith("/api/cron/output"):
+            from urllib.parse import parse_qs, urlparse
+            try:
+                q = parse_qs(urlparse(self.path).query)
+                self._json(cronfeed.read_output((q.get("job") or [""])[0],
+                                                (q.get("file") or [""])[0]))
+            except Exception as e:
+                self._json({"ok": False, "error": str(e)}, 500)
         else:
             self._send(200, HTML)
 

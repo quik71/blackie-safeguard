@@ -1,6 +1,2 @@
-2026-09-24 09:54:27 ===== RESTORE START: /home/blackieserver/hermes-backups/20260924-0200AM =====
-2026-09-24 09:54:30 VERIFY /home/blackieserver/hermes-backups/20260924-0200AM -> OK
-2026-09-24 09:54:30 stopping hermes-gateway.service
-2026-09-24 09:54:34 extracting /home/blackieserver/hermes-backups/20260924-0200AM/hermes-20260924-0200AM.tgz into HOME
-2026-09-24 09:54:40 restarting hermes-gateway.service
-2026-09-24 09:54:46 RESTORE COMPLETE: gateway ACTIVE
+2026-09-26 10:35:12 restarting hermes-gateway.service
+2026-09-26 10:35:18 RESTORE COMPLETE: gateway ACTIVE
