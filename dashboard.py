@@ -103,11 +103,16 @@ HTML = """<!doctype html>
             display:none; }
   .jrow { display:flex; align-items:center; gap:10px; padding:9px 12px;
           background:var(--card2); border:1px solid var(--line);
-          border-radius:10px; margin-bottom:6px; }
+          border-radius:10px; margin-bottom:6px; cursor:pointer; }
+  .jrow:hover { border-color:var(--muted); }
+  .jrow.sel { border-color:var(--blue); }
   .jrow .jn { flex:1; min-width:0; font-size:13px; }
   .jrow .jm { color:var(--muted); font-size:11px; font-family:monospace;
               overflow-wrap:anywhere; }
-  .jrow select { width:auto; min-width:180px; padding:5px 8px; font-size:12px; }
+  .cronbar { display:flex; justify-content:center; align-items:center; gap:8px;
+             flex-wrap:wrap; margin-top:12px; }
+  .cronbar select { width:auto; max-width:44%; min-width:165px;
+                    padding:7px 10px; font-size:12px; }
   .runout { background:#0b0f14; border:1px solid var(--line); border-radius:10px;
             padding:12px; margin:10px 0 0; font-family:monospace; font-size:12px;
             white-space:pre-wrap; overflow-wrap:anywhere; max-height:420px;
@@ -155,12 +160,15 @@ HTML = """<!doctype html>
 
   <div class="panel"><h2>Cron job output</h2>
     <div id="cron-jobs"></div>
-    <div class="tip">Every scheduled job with its recent runs, newest first. Pick a run
-      and press View — you get exactly what that run produced (a script's stdout/stderr,
-      or the agent's written reply). Runs that printed nothing are still listed, marked
-      <code>silent</code>.</div>
-    <pre class="runout" id="cron-out">No run selected — pick a run above and press View.</pre>
+    <div class="cronbar">
+      <select id="cron-job-sel" aria-label="Cron job"></select>
+      <select id="cron-run-sel" aria-label="Run"></select>
+      <button class="btn small" onclick="viewSelected()">View</button>
+    </div>
+    <pre class="runout" id="cron-out">No run selected — click a job above, then press View.</pre>
     <div class="tip" id="cron-sel"></div>
+    <div class="tip">Each job's recent runs, newest first. Clicking a job loads its newest
+      run. Runs that printed nothing are still listed, marked <code>silent</code>.</div>
   </div>
 </div><script>
 const COLORS={green:'var(--ok)',red:'var(--bad)',yellow:'var(--warn)',unknown:'var(--muted)'};
@@ -248,14 +256,22 @@ async function load(){
   }
 }
 // ---- cron job output ----
-// VIEW keeps the currently-open run alive across the 20 s auto-refresh, so the
-// panel doesn't yank the text you're reading out from under you.
-let VIEW={job:'',file:'',text:'',meta:''};
+// One run-picker for the whole panel, centred at the bottom: a select per row
+// squeezed the job text into a narrow column. Clicking a job row loads its
+// newest run. JOB/VIEW survive the 20 s auto-refresh so nothing yanks the text
+// you are reading out from under you.
+let CRON=null, JOB='', VIEW={job:'',file:'',text:'',meta:''};
+function jobById(id){const jobs=(CRON&&CRON.jobs)||[];for(const j of jobs){if(j.id===id)return j;}return null;}
 function renderCron(cd){
+  CRON=cd;
+  const jobs=cd.jobs||[];
+  if(!JOB&&jobs.length)JOB=jobs[0].id;
   const box=document.getElementById('cron-jobs');
   box.innerHTML=''; // clear only; all values below use textContent
-  (cd.jobs||[]).forEach(j=>{
-    const row=document.createElement('div');row.className='jrow';
+  jobs.forEach(j=>{
+    const row=document.createElement('div');
+    row.className='jrow'+(j.id===JOB?' sel':'');
+    row.title='Click to open the newest run for this job';
     const info=document.createElement('div');info.className='jn';
     const nm=document.createElement('div');nm.textContent=j.name;
     const meta=document.createElement('div');meta.className='jm';
@@ -275,28 +291,57 @@ function renderCron(cd){
       info.appendChild(e2);
     }
     row.appendChild(info);
-    const sel=document.createElement('select');sel.dataset.job=j.id;
-    if(!j.files.length){
-      const o=document.createElement('option');o.value='';o.textContent='no runs saved';
-      sel.appendChild(o);sel.disabled=true;
-    }else{
-      j.files.forEach(f=>{
-        const o=document.createElement('option');o.value=f.name;
-        o.textContent=f.name.replace('.md','')+'  ('+Math.max(1,Math.round(f.size/1024))+'K)';
-        sel.appendChild(o);
-      });
-      if(VIEW.job===j.id&&VIEW.file)sel.value=VIEW.file;
-    }
-    row.appendChild(sel);
-    const btn=document.createElement('button');btn.className='btn small';btn.textContent='View';
-    btn.disabled=!j.files.length;
-    btn.onclick=()=>viewRun(j.id,sel.value,j.name);
-    row.appendChild(btn);
+    row.onclick=()=>selectJob(j.id,true);
     box.appendChild(row);
   });
+  // job dropdown (bottom bar)
+  const js=document.getElementById('cron-job-sel');
+  js.innerHTML='';
+  jobs.forEach(j=>{
+    const o=document.createElement('option');o.value=j.id;o.textContent=j.name;
+    js.appendChild(o);
+  });
+  js.value=JOB;
+  js.disabled=!jobs.length;
+  fillRuns();
   const out=document.getElementById('cron-out');
-  out.textContent=VIEW.text||'No run selected — pick a run above and press View.';
+  out.textContent=VIEW.text||'No run selected — click a job above, then press View.';
   document.getElementById('cron-sel').textContent=VIEW.meta;
+}
+function fillRuns(){
+  const j=jobById(JOB), rs=document.getElementById('cron-run-sel');
+  rs.innerHTML='';
+  const files=(j&&j.files)||[];
+  if(!files.length){
+    const o=document.createElement('option');o.value='';o.textContent='no runs saved';
+    rs.appendChild(o);rs.disabled=true;
+    return;
+  }
+  rs.disabled=false;
+  files.forEach(f=>{
+    const o=document.createElement('option');o.value=f.name;
+    o.textContent=f.name.replace('.md','')+'  ('+Math.max(1,Math.round(f.size/1024))+'K)';
+    rs.appendChild(o);
+  });
+  if(VIEW.job===JOB&&VIEW.file)rs.value=VIEW.file;
+}
+function selectJob(id,autoView){
+  JOB=id;
+  const js=document.getElementById('cron-job-sel');if(js)js.value=id;
+  const jobs=(CRON&&CRON.jobs)||[];
+  [...document.querySelectorAll('#cron-jobs .jrow')].forEach((r,i)=>{
+    r.classList.toggle('sel',(jobs[i]||{}).id===id);
+  });
+  fillRuns();
+  if(autoView){
+    const rs=document.getElementById('cron-run-sel');
+    if(rs&&rs.value)viewRun(id,rs.value,(jobById(id)||{}).name||id);
+  }
+}
+function viewSelected(){
+  const j=document.getElementById('cron-job-sel').value;
+  const f=document.getElementById('cron-run-sel').value;
+  if(j&&f)viewRun(j,f,(jobById(j)||{}).name||j);
 }
 async function viewRun(jobId,file,jobName){
   if(!file)return;
@@ -346,6 +391,8 @@ function doRestore(){
     load();
   }).catch(e=>{banner('Error: '+e.message,'err');});
 }
+document.getElementById('cron-job-sel').onchange=e=>selectJob(e.target.value,true);
+document.getElementById('cron-run-sel').onchange=viewSelected;
 load();
 setInterval(load, 20000);
 </script></body></html>"""
